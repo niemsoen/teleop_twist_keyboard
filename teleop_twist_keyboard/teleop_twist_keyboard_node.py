@@ -114,7 +114,15 @@ speedBindings = {
 }
 
 
-def getKey(settings, lock, keyPublisher):
+def printClean(settings, msg):
+    # change terminal settings temporarily for standard printing
+    termios.tcsetattr(sys.stdin, termios.TCSADRAIN, settings)
+    print(msg)
+    # default state: setup terminal for getKey
+    tty.setraw(sys.stdin.fileno())
+
+
+def getKey(settings, keyLock, keyPublisher):
     global lastkey
     keyChanged = False
     key = '' # local read variable for key
@@ -124,16 +132,14 @@ def getKey(settings, lock, keyPublisher):
             key = msvcrt.getwch()
             keyChanged = True
         else:
-            tty.setraw(sys.stdin.fileno())
-            # sys.stdin.read() returns a string on Linux
-            key = sys.stdin.read(1)
-            keyChanged = True
-            termios.tcsetattr(sys.stdin, termios.TCSADRAIN, settings)        
+            tty.setraw(sys.stdin.fileno())            
+            key = sys.stdin.read(1) # this is blocking
+            keyChanged = True                        
 
         if keyChanged:
-            lock.acquire(blocking=True)
+            keyLock.acquire(blocking=True)
             lastkey = key
-            lock.release()
+            keyLock.release()
 
             msg = String()
             msg.data = 'last key pressed:' + lastkey
@@ -161,7 +167,7 @@ def vels(_speed, _turn):
     return 'currently:\tspeed %s\tturn %s ' % (_speed, _turn)
 
 
-def evaluateKey(lock,node):
+def evaluateKey(keyLock, node):
     global lastkey
     x = 0.0
     y = 0.0
@@ -172,17 +178,20 @@ def evaluateKey(lock,node):
     lastCmdWasHalt = False
     keyWasPressed = True
     
-    print(msg)
-    print(vels(node.speed, node.turn))
-    
     while True:
+        # print help message every X lines
+        if (status == printMsgEvery):
+            printClean(node.termSet, msg)
+            printClean(node.termSet, vels(node.speed, node.turn))
+            status = (status + 1) % (printMsgEvery+1)
+
         # make copy of key that is evaluated
         key_copy = lastkey
         if key_copy != '':
             keyWasPressed = True
-            lock.acquire(blocking=True)
+            keyLock.acquire(blocking=True)
             lastkey = ''
-            lock.release()
+            keyLock.release()
         
         if key_copy in moveBindings.keys():
             x = moveBindings[key_copy][0]
@@ -199,8 +208,7 @@ def evaluateKey(lock,node):
             twist.angular.z = th * node.turn
             
             node.pubTwist.publish(twist)
-            lastCmdWasHalt = False
-        
+            lastCmdWasHalt = False        
         elif key_copy in speedBindings.keys():
             node.speed = node.speed * speedBindings[key_copy][0]
             node.turn = node.turn * speedBindings[key_copy][1]
@@ -210,10 +218,11 @@ def evaluateKey(lock,node):
             node.sendHalt()
             lastCmdWasHalt = True
 
-            print(vels(node.speed, node.turn))
+            # print updated speeds
+            printClean(node.termSet, vels(node.speed, node.turn))
+            
             # increment status for help message printing
-            status = (status + 1) % (printMsgEvery+1)
-        
+            status = (status + 1) % (printMsgEvery+1)        
         else:
             # check for ctrl+c
             if (key_copy == '\x03'):                
@@ -223,14 +232,8 @@ def evaluateKey(lock,node):
             if not lastCmdWasHalt:
                 node.sendHalt()
                 lastCmdWasHalt = True
-                print('no move/speed cmd: sent STOP')
-                status = (status + 1) % (printMsgEvery+1)
-        
-        # print help message every X lines
-        if (status == printMsgEvery):
-            print(msg)
-            print(vels(node.speed, node.turn))
-            status = (status + 1) % (printMsgEvery+1)
+                printClean(node.termSet, 'Key released: sent STOP')
+                status = (status + 1) % (printMsgEvery+1)                
 
         if keyWasPressed:
             time.sleep(readKeyTimeout)
@@ -287,35 +290,36 @@ def main():
     
     node.get_logger().info('Started teleop')
 
-    termSet = saveTerminalSettings()
+    node.termSet = saveTerminalSettings()
     node.pubTwist = node.create_publisher(geometry_msgs.msg.Twist, 'cmd_vel', 10)
     node.pubKey = node.create_publisher(String, 'key_pressed', 10)
 
     # lock for the 'lastkey' variable
-    lock = threading.Lock()
+    keyLock = threading.Lock()
 
+    # print help message
     print(msg)
     print(vels(node.speed, node.turn))
 
     # thread for evaluating the key that was read
-    evalThread = threading.Thread(target=evaluateKey, args=(lock,node,), name='evalThread')
+    evalThread = threading.Thread(target=evaluateKey, args=(keyLock,node,), name='evalThread')
     
     try:
-        # launches evaluating key reading in seperate thread
         evalThread.start() 
 
-        # launches loop for key reading in main thread
-        getKey(termSet, lock, node.pubKey) # blocking
+        # key reading loop in main thread
+        getKey(node.termSet, keyLock, node.pubKey) # blocking
 
     except Exception as e:
         node.get_logger().info('Exception occured in executing threads: ' + str(e))
     
     finally:
         evalThread.join()
+        
         node.sendHalt()
         node.get_logger().info('Sent STOP command, shutting down')
-    
-    restoreTerminalSettings(termSet)
+        
+        restoreTerminalSettings(node.termSet)        
 
 
 if __name__ == '__main__':
