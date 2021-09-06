@@ -174,7 +174,7 @@ def evaluateKey(keyLock, node):
     z = 0.0
     th = 0.0
     status = 0.0
-    printMsgEvery = 10
+    printMsgEvery = 6
     lastCmdWasHalt = False
     keyWasPressed = True
     
@@ -208,6 +208,9 @@ def evaluateKey(keyLock, node):
             twist.angular.z = th * node.turn
             
             node.pubTwist.publish(twist)
+            if lastCmdWasHalt:
+                printClean(node.termSet, 'moving...')
+                status = (status + 1) % (printMsgEvery+1)
             lastCmdWasHalt = False        
         elif key_copy in speedBindings.keys():
             node.speed = node.speed * speedBindings[key_copy][0]
@@ -222,7 +225,7 @@ def evaluateKey(keyLock, node):
             printClean(node.termSet, vels(node.speed, node.turn))
             
             # increment status for help message printing
-            status = (status + 1) % (printMsgEvery+1)        
+            status = (status + 1) % (printMsgEvery+1)
         else:
             # check for ctrl+c
             if (key_copy == '\x03'):                
@@ -232,7 +235,7 @@ def evaluateKey(keyLock, node):
             if not lastCmdWasHalt:
                 node.sendHalt()
                 lastCmdWasHalt = True
-                printClean(node.termSet, 'Key released: sent STOP')
+                printClean(node.termSet, 'STOP (Key released)')
                 status = (status + 1) % (printMsgEvery+1)                
 
         if keyWasPressed:
