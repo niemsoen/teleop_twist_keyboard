@@ -114,6 +114,13 @@ speedBindings = {
 }
 
 
+def printClean(lock, settings, msg):
+    lock.acquire(blocking = True)
+    termios.tcsetattr(sys.stdin, termios.TCSADRAIN, settings)
+    print(msg)
+    lock.release()
+
+
 def getKey(settings, lock, keyPublisher):
     global lastkey
     keyChanged = False
@@ -172,9 +179,6 @@ def evaluateKey(lock,node):
     lastCmdWasHalt = False
     keyWasPressed = True
     
-    print(msg)
-    print(vels(node.speed, node.turn))
-    
     while True:
         # make copy of key that is evaluated
         key_copy = lastkey
@@ -210,7 +214,9 @@ def evaluateKey(lock,node):
             node.sendHalt()
             lastCmdWasHalt = True
 
-            print(vels(node.speed, node.turn))
+            #print(vels(node.speed, node.turn))
+            msg = vels(node.speed, node.turn)
+            printClean(lock, node.termSet, msg)
             # increment status for help message printing
             status = (status + 1) % (printMsgEvery+1)
         
@@ -287,13 +293,14 @@ def main():
     
     node.get_logger().info('Started teleop')
 
-    termSet = saveTerminalSettings()
+    node.termSet = saveTerminalSettings()
     node.pubTwist = node.create_publisher(geometry_msgs.msg.Twist, 'cmd_vel', 10)
     node.pubKey = node.create_publisher(String, 'key_pressed', 10)
 
     # lock for the 'lastkey' variable
     lock = threading.Lock()
 
+    # print help message
     print(msg)
     print(vels(node.speed, node.turn))
 
@@ -305,7 +312,7 @@ def main():
         evalThread.start() 
 
         # launches loop for key reading in main thread
-        getKey(termSet, lock, node.pubKey) # blocking
+        getKey(node.termSet, lock, node.pubKey) # blocking
 
     except Exception as e:
         node.get_logger().info('Exception occured in executing threads: ' + str(e))
