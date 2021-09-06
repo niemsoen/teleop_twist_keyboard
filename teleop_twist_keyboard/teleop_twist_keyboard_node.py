@@ -218,8 +218,9 @@ def evaluateKey(keyLock, node):
             node.sendHalt()
             lastCmdWasHalt = True
 
-            #print(vels(node.speed, node.turn))
+            # print updated speeds
             printClean(node.termSet, vels(node.speed, node.turn))
+            
             # increment status for help message printing
             status = (status + 1) % (printMsgEvery+1)        
         else:
