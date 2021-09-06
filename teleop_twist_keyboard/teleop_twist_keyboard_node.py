@@ -128,10 +128,7 @@ def getKey(settings, lock, keyPublisher):
             # sys.stdin.read() returns a string on Linux
             key = sys.stdin.read(1)
             keyChanged = True
-            termios.tcsetattr(sys.stdin, termios.TCSADRAIN, settings)
-        # check for ctrl+c
-        if (key == '\x03'):
-            break
+            termios.tcsetattr(sys.stdin, termios.TCSADRAIN, settings)        
 
         if keyChanged:
             lock.acquire(blocking=True)
@@ -141,7 +138,11 @@ def getKey(settings, lock, keyPublisher):
             msg = String()
             msg.data = 'last key pressed:' + lastkey
             keyPublisher.publish(msg)
-            keyChanged = False
+            keyChanged = False            
+
+            # check for ctrl+c
+            if (key == '\x03'):
+                break
 
 
 def saveTerminalSettings():
@@ -215,7 +216,7 @@ def evaluateKey(lock,node):
         
         else:
             # check for ctrl+c
-            if (key_copy == '\x03'):                    
+            if (key_copy == '\x03'):                
                 break
             
             # send halt command, avoiding repetition
@@ -297,7 +298,7 @@ def main():
     print(vels(node.speed, node.turn))
 
     # thread for evaluating the key that was read
-    evalThread = threading.Thread(target=evaluateKey, args=(lock,node,))
+    evalThread = threading.Thread(target=evaluateKey, args=(lock,node,), name='evalThread')
     
     try:
         # launches evaluating key reading in seperate thread
@@ -307,7 +308,7 @@ def main():
         getKey(termSet, lock, node.pubKey) # blocking
 
     except Exception as e:
-        node.get_logger().info('Exception occured: ' + e)
+        node.get_logger().info('Exception occured in executing threads: ' + str(e))
     
     finally:
         evalThread.join()
