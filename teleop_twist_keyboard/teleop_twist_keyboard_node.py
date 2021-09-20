@@ -79,6 +79,7 @@ anything else : stop
 q/z : increase/decrease max speeds by 10%
 w/x : increase/decrease only linear speed by 10%
 e/c : increase/decrease only angular speed by 10%
+r   : reset speeds to default
 
 CTRL-C to quit
 """
@@ -163,8 +164,9 @@ def restoreTerminalSettings(old_settings):
     termios.tcsetattr(sys.stdin, termios.TCSADRAIN, old_settings)
 
 
-def vels(_speed, _turn):
-    return 'currently:\tspeed %s\tturn %s ' % (_speed, _turn)
+def paramsToStr(node):
+    p = (node.targetSpeed, node.targetTurn, node.accel)
+    return 'speeds:\tlinear %.2f\tturn %.2f\tmax_accel: %.2f' % p
 
 
 def evaluateKey(keyLock, node):
@@ -183,7 +185,7 @@ def evaluateKey(keyLock, node):
         # print help message every X lines
         if (status == printMsgEvery):
             printClean(node.termSet, msg)
-            printClean(node.termSet, vels(node.targetSpeed, node.turn))
+            printClean(node.termSet, paramsToStr(node))
             status = (status + 1) % (printMsgEvery+1)
 
         # make copy of key that is evaluated
@@ -195,12 +197,20 @@ def evaluateKey(keyLock, node):
             keyLock.release()
         
         if key_copy in moveBindings.keys():
+            if lastCmdWasHalt:
+                printClean(node.termSet, 'moving...')
+                status = (status + 1) % (printMsgEvery+1)
+                consecutiveMoveSteps = 0
+            lastCmdWasHalt = False
             # accelerate the robot
             consecutiveMoveSteps += 1
             timeSinceHalt = consecutiveMoveSteps * readKeyTimeout
-            node.speed = timeSinceHalt * node.targetSpeed
+            node.speed = timeSinceHalt * node.accel
+            node.turn = timeSinceHalt * node.accel
             if node.speed >= node.targetSpeed:
                 node.speed = node.targetSpeed
+            if node.turn >= node.targetTurn:
+                node.turn = node.targetTurn
             
             x = moveBindings[key_copy][0]
             y = moveBindings[key_copy][1]
@@ -216,15 +226,9 @@ def evaluateKey(keyLock, node):
             twist.angular.z = th * node.turn
             
             node.pubTwist.publish(twist)
-
-            if lastCmdWasHalt:
-                printClean(node.termSet, 'moving...')
-                status = (status + 1) % (printMsgEvery+1)
-                consecutiveMoveSteps = 0
-            lastCmdWasHalt = False        
         elif key_copy in speedBindings.keys():
             node.targetSpeed = node.targetSpeed * speedBindings[key_copy][0]
-            node.turn = node.turn * speedBindings[key_copy][1]
+            node.targetTurn = node.targetTurn * speedBindings[key_copy][1]
             node.updateRosParams()
             
             # send halt command
@@ -232,7 +236,7 @@ def evaluateKey(keyLock, node):
             lastCmdWasHalt = True
 
             # print updated speeds
-            printClean(node.termSet, vels(node.targetSpeed, node.turn))
+            printClean(node.termSet, paramsToStr(node))
             
             # increment status for help message printing
             status = (status + 1) % (printMsgEvery+1)
@@ -240,6 +244,16 @@ def evaluateKey(keyLock, node):
             # check for ctrl+c
             if (key_copy == '\x03'):                
                 break
+
+            # reset speeds to default
+            if (key_copy == 'r'):
+                node.targetSpeed = 0.25
+                node.targetTurn = 0.25
+                printClean(node.termSet, "Reset speeds:")
+                node.updateRosParams()
+                printClean(node.termSet, paramsToStr(node))
+                # increment status for help message printing
+                status = (status + 1) % (printMsgEvery+1)
             
             # send halt command, avoiding repetition
             if not lastCmdWasHalt:
@@ -254,17 +268,15 @@ def evaluateKey(keyLock, node):
 
 class MinimalParam(rclpy.node.Node):
     def __init__(self):
-        super().__init__('teleop_twist_keyboard_rosrun')
+        super().__init__('teleop_twist_keyboard')
 
-        self.declare_parameter('speed', 1.0)
-        self.declare_parameter('turn', 1.0)
+        self.declare_parameter('speed', 0.25)
+        self.declare_parameter('turn', 0.25)
         self.declare_parameter('max_accel', 0.25)
-        #self.declare_parameter('readKeyTimeout', 0.1)
         
         self.targetSpeed = self.get_parameter('speed').get_parameter_value().double_value
-        self.turn = self.get_parameter('turn').get_parameter_value().double_value
+        self.targetTurn = self.get_parameter('turn').get_parameter_value().double_value
         self.accel = self.get_parameter('max_accel').get_parameter_value().double_value
-        #readKeyTimeout = self.get_parameter('readKeyTimeout').get_parameter_value().double_value
         
         self.add_on_set_parameters_callback(self.parameters_callback)
     
@@ -273,15 +285,16 @@ class MinimalParam(rclpy.node.Node):
             if param.name == "speed":
                 self.targetSpeed = param.value
             if param.name == "turn":
-                self.turn = param.value
-        #print(vels(self.speed, self.turn))
+                self.targetTurn = param.value
+            if param.name == "max_accel":
+                self.accel = param.value
         return SetParametersResult(successful=True)
 
     ''' Updates the ROS-parameters after the local speed and turn are changed
     '''
     def updateRosParams(self):
         param_speed = Parameter('speed', Parameter.Type.DOUBLE, self.targetSpeed)
-        param_turn = Parameter('turn', Parameter.Type.DOUBLE, self.turn)
+        param_turn = Parameter('turn', Parameter.Type.DOUBLE, self.targetTurn)
         self.set_parameters([param_speed, param_turn])
     
     ''' Sends halt command on the topic /cmd_vel
@@ -314,16 +327,16 @@ def main():
 
     # print help message
     print(msg)
-    print(vels(node.targetSpeed, node.turn))
+    print(paramsToStr(node))
 
     # thread for evaluating the key that was read
     evalThread = threading.Thread(target=evaluateKey, args=(keyLock,node,), name='evalThread')
+    keyThread = threading.Thread(target=getKey, args=(node.termSet, keyLock, node.pubKey), name='getKeyThread')
     
     try:
         evalThread.start() 
-
-        # key reading loop in main thread
-        getKey(node.termSet, keyLock, node.pubKey) # blocking
+        keyThread.start()
+        rclpy.spin(node)
 
     except Exception as e:
         node.get_logger().info('Exception occured in executing threads: ' + str(e))
