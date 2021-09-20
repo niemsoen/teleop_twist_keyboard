@@ -177,12 +177,13 @@ def evaluateKey(keyLock, node):
     printMsgEvery = 6
     lastCmdWasHalt = False
     keyWasPressed = True
+    consecutiveMoveSteps = 0
     
     while True:
         # print help message every X lines
         if (status == printMsgEvery):
             printClean(node.termSet, msg)
-            printClean(node.termSet, vels(node.speed, node.turn))
+            printClean(node.termSet, vels(node.targetSpeed, node.turn))
             status = (status + 1) % (printMsgEvery+1)
 
         # make copy of key that is evaluated
@@ -194,6 +195,13 @@ def evaluateKey(keyLock, node):
             keyLock.release()
         
         if key_copy in moveBindings.keys():
+            # accelerate the robot
+            consecutiveMoveSteps += 1
+            timeSinceHalt = consecutiveMoveSteps * readKeyTimeout
+            node.speed = timeSinceHalt * node.targetSpeed
+            if node.speed >= node.targetSpeed:
+                node.speed = node.targetSpeed
+            
             x = moveBindings[key_copy][0]
             y = moveBindings[key_copy][1]
             z = moveBindings[key_copy][2]
@@ -208,12 +216,14 @@ def evaluateKey(keyLock, node):
             twist.angular.z = th * node.turn
             
             node.pubTwist.publish(twist)
+
             if lastCmdWasHalt:
                 printClean(node.termSet, 'moving...')
                 status = (status + 1) % (printMsgEvery+1)
+                consecutiveMoveSteps = 0
             lastCmdWasHalt = False        
         elif key_copy in speedBindings.keys():
-            node.speed = node.speed * speedBindings[key_copy][0]
+            node.targetSpeed = node.targetSpeed * speedBindings[key_copy][0]
             node.turn = node.turn * speedBindings[key_copy][1]
             node.updateRosParams()
             
@@ -222,7 +232,7 @@ def evaluateKey(keyLock, node):
             lastCmdWasHalt = True
 
             # print updated speeds
-            printClean(node.termSet, vels(node.speed, node.turn))
+            printClean(node.termSet, vels(node.targetSpeed, node.turn))
             
             # increment status for help message printing
             status = (status + 1) % (printMsgEvery+1)
@@ -248,10 +258,12 @@ class MinimalParam(rclpy.node.Node):
 
         self.declare_parameter('speed', 1.0)
         self.declare_parameter('turn', 1.0)
+        self.declare_parameter('max_accel', 0.25)
         #self.declare_parameter('readKeyTimeout', 0.1)
         
-        self.speed = self.get_parameter('speed').get_parameter_value().double_value
+        self.targetSpeed = self.get_parameter('speed').get_parameter_value().double_value
         self.turn = self.get_parameter('turn').get_parameter_value().double_value
+        self.accel = self.get_parameter('max_accel').get_parameter_value().double_value
         #readKeyTimeout = self.get_parameter('readKeyTimeout').get_parameter_value().double_value
         
         self.add_on_set_parameters_callback(self.parameters_callback)
@@ -259,7 +271,7 @@ class MinimalParam(rclpy.node.Node):
     def parameters_callback(self, params):
         for param in params:
             if param.name == "speed":
-                self.speed = param.value
+                self.targetSpeed = param.value
             if param.name == "turn":
                 self.turn = param.value
         #print(vels(self.speed, self.turn))
@@ -268,7 +280,7 @@ class MinimalParam(rclpy.node.Node):
     ''' Updates the ROS-parameters after the local speed and turn are changed
     '''
     def updateRosParams(self):
-        param_speed = Parameter('speed', Parameter.Type.DOUBLE, self.speed)
+        param_speed = Parameter('speed', Parameter.Type.DOUBLE, self.targetSpeed)
         param_turn = Parameter('turn', Parameter.Type.DOUBLE, self.turn)
         self.set_parameters([param_speed, param_turn])
     
@@ -302,7 +314,7 @@ def main():
 
     # print help message
     print(msg)
-    print(vels(node.speed, node.turn))
+    print(vels(node.targetSpeed, node.turn))
 
     # thread for evaluating the key that was read
     evalThread = threading.Thread(target=evaluateKey, args=(keyLock,node,), name='evalThread')
