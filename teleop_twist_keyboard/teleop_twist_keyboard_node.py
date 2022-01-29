@@ -226,7 +226,36 @@ class TeleopKeyboard(rclpy.node.Node):
     def params_to_str(self):
         p = (self.target_speed, self.target_turn, self.accel)
         return 'speeds:\tlinear %.2f\tturn %.2f\tmax_accel: %.2f' % p
+    
 
+    def get_accelerated_twist(self, start_move_time, key_copy):
+        min_speed = 0.005
+        timeSinceHalt = time.time() - start_move_time
+        self.speed = timeSinceHalt * self.accel
+        self.turn = timeSinceHalt * self.accel
+
+        if self.speed >= self.target_speed:
+            self.speed = self.target_speed
+        if self.speed < min_speed:
+            self.speed = 0.0
+        if self.turn >= self.target_turn:
+            self.turn = self.target_turn
+        if self.turn < min_speed:
+            self.turn = 0.0
+        
+        x = self.move_bindings[key_copy][0]
+        y = self.move_bindings[key_copy][1]
+        z = self.move_bindings[key_copy][2]
+        th = self.move_bindings[key_copy][3]
+        
+        twist = geometry_msgs.msg.Twist()
+        twist.linear.x = x * self.speed
+        twist.linear.y = y * self.speed
+        twist.linear.z = z * self.speed
+        twist.angular.x = 0.0
+        twist.angular.y = 0.0
+        twist.angular.z = th * self.turn
+        return twist
 
     def read_key(self):
         key_changed = False
@@ -264,7 +293,7 @@ class TeleopKeyboard(rclpy.node.Node):
         status = 0.0
         print_msg_every = 6
         self.last_cmd_halt = False
-        consecutive_move_cmds = 0
+        start_move_time = time.time()
         
         
         while True:
@@ -283,32 +312,10 @@ class TeleopKeyboard(rclpy.node.Node):
                 if self.last_cmd_halt:
                     self.print_clean('moving...')
                     status = (status + 1) % (print_msg_every+1)
-                    consecutive_move_cmds = 0
+                    start_move_time = time.time()
                 self.last_cmd_halt = False
                 
-                # accelerate the robot
-                consecutive_move_cmds += 1
-                timeSinceHalt = consecutive_move_cmds * self.read_key_timeout
-                self.speed = timeSinceHalt * self.accel
-                self.turn = timeSinceHalt * self.accel
-                if self.speed >= self.target_speed:
-                    self.speed = self.target_speed
-                if self.turn >= self.target_turn:
-                    self.turn = self.target_turn
-                
-                x = self.move_bindings[key_copy][0]
-                y = self.move_bindings[key_copy][1]
-                z = self.move_bindings[key_copy][2]
-                th = self.move_bindings[key_copy][3]
-                
-                twist = geometry_msgs.msg.Twist()
-                twist.linear.x = x * self.speed
-                twist.linear.y = y * self.speed
-                twist.linear.z = z * self.speed
-                twist.angular.x = 0.0
-                twist.angular.y = 0.0
-                twist.angular.z = th * self.turn
-                
+                twist = self.get_accelerated_twist(start_move_time, key_copy)
                 self.pub_twist.publish(twist)
             
             elif key_copy in self.speed_bindings.keys():
