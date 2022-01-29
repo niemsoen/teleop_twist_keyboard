@@ -60,10 +60,14 @@ class TeleopKeyboard(rclpy.node.Node):
         self.declare_parameter('speed', 0.25)
         self.declare_parameter('turn', 0.25)
         self.declare_parameter('max_accel', 0.25)
+        self.declare_parameter('max_deccel', -1.0)
         
         self.target_speed = self.get_parameter('speed').get_parameter_value().double_value
         self.target_turn = self.get_parameter('turn').get_parameter_value().double_value
         self.accel = self.get_parameter('max_accel').get_parameter_value().double_value
+        self.deccel = self.get_parameter('max_deccel').get_parameter_value().double_value
+        self.speed = 0.0
+        self.turn = 0.0
         
         self.add_on_set_parameters_callback(self.parameters_callback)
 
@@ -128,6 +132,10 @@ class TeleopKeyboard(rclpy.node.Node):
             '': (0, 0, 0, 0),
         }
 
+        self.emergency_halt_bindings = {
+            ' ': (0, 0, 0, 0),  # space bar
+        }
+
         self.speed_bindings = {
             'q': (1.1, 1.1),
             'z': (.9, .9),
@@ -139,7 +147,7 @@ class TeleopKeyboard(rclpy.node.Node):
 
         # print help message
         self.print_help_message()
-        self.print_speeds()
+        self.print_target_speeds()
 
         self.last_key = ''
         self.read_key_timeout = 0.1
@@ -147,6 +155,9 @@ class TeleopKeyboard(rclpy.node.Node):
         # lock for the 'lastkey' variable
         self.key_lock = threading.Condition()
         self.shutdown = threading.Event()
+        self.emergency_stop = threading.Event()
+        self.stopped_accel_runtime = threading.Event()
+        self.stopped_accel_runtime.set()
 
         # thread for evaluating the key that was read
         self.eval_key_thread = threading.Thread(target=self.evaluate_key, name='self.eval_key_thread')
@@ -177,11 +188,36 @@ class TeleopKeyboard(rclpy.node.Node):
         self.set_parameters([param_speed, param_turn])
     
 
-    ''' Sends halt command on the topic /cmd_vel
+    ''' Deccelerate to velocity=zero
     '''
-    def send_halt(self):
+    def deccelerate_to_halt(self, key_copy):
         if self.last_cmd_halt:
             return
+        
+        stop_time = time.time()
+        v0 = self.speed
+        t0 = self.turn
+        self.stopped_accel_runtime.clear()
+        while abs(self.speed) > 0.0:
+            twist = self.get_accelerated_twist(stop_time, key_copy, 0.0, 0.0, self.deccel, v0, t0)
+            self.pub_twist.publish(twist)
+
+            if self.emergency_stop.is_set():
+                self.stopped_accel_runtime.set()
+                return
+        
+        self.print_clean('stop')
+        self.stopped_accel_runtime.set()
+        self.last_cmd_halt = True
+    
+
+    def send_emergency_halt(self):
+        self.emergency_stop.set()
+        self.stopped_accel_runtime.wait()
+                
+        self.speed = 0.0
+        self.turn = 0.0
+        
         twist = geometry_msgs.msg.Twist()
         twist.linear.x = 0.0
         twist.linear.y = 0.0
@@ -190,8 +226,11 @@ class TeleopKeyboard(rclpy.node.Node):
         twist.angular.y = 0.0
         twist.angular.z = 0.0
         self.pub_twist.publish(twist)
+        
+        self.print_clean('emergency stop')
         self.last_cmd_halt = True
-        self.print_clean('stop')
+
+        self.emergency_stop.clear()
     
 
     def print_clean(self, msg):
@@ -202,7 +241,7 @@ class TeleopKeyboard(rclpy.node.Node):
         tty.setraw(sys.stdin.fileno())
     
 
-    def print_speeds(self):
+    def print_target_speeds(self):
         self.print_clean(self.params_to_str())
     
     
@@ -228,18 +267,19 @@ class TeleopKeyboard(rclpy.node.Node):
         return 'speeds:\tlinear %.2f\tturn %.2f\tmax_accel: %.2f' % p
     
 
-    def get_accelerated_twist(self, start_move_time, key_copy):
+    def get_accelerated_twist(self, start_move_time, key_copy, target_speed, target_turn, accel, v0, t0):
         min_speed = 0.005
         timeSinceHalt = time.time() - start_move_time
-        self.speed = timeSinceHalt * self.accel
-        self.turn = timeSinceHalt * self.accel
+        self.speed = timeSinceHalt * accel + v0
+        self.turn = timeSinceHalt * accel + t0
 
-        if self.speed >= self.target_speed:
-            self.speed = self.target_speed
+        if self.speed >= target_speed and accel>0:
+            self.speed = target_speed
+        if self.turn >= target_turn and accel>0:
+            self.turn = target_turn
+        
         if self.speed < min_speed:
             self.speed = 0.0
-        if self.turn >= self.target_turn:
-            self.turn = self.target_turn
         if self.turn < min_speed:
             self.turn = 0.0
         
@@ -254,7 +294,7 @@ class TeleopKeyboard(rclpy.node.Node):
         twist.linear.z = z * self.speed
         twist.angular.x = 0.0
         twist.angular.y = 0.0
-        twist.angular.z = th * self.turn
+        twist.angular.z = th * self.turn        
         return twist
 
     def read_key(self):
@@ -268,16 +308,18 @@ class TeleopKeyboard(rclpy.node.Node):
             else:
                 tty.setraw(sys.stdin.fileno())            
                 key = sys.stdin.read(1) # this is blocking
-
                 with self.key_lock:
                     self.last_key = key
                     self.key_lock.notify()
-
                 # msg = String()
                 # msg.data = 'last key pressed:' + self.last_key
                 # self.pub_key.publish(msg)
 
-            if key == "\x03":
+            if key in self.emergency_halt_bindings.keys(): # space-bar
+                self.send_emergency_halt()
+            
+            if key == "\x03": # ctrl+c
+                self.send_emergency_halt()
                 self.shutdown.set()
                 break
         
@@ -294,13 +336,14 @@ class TeleopKeyboard(rclpy.node.Node):
         print_msg_every = 6
         self.last_cmd_halt = False
         start_move_time = time.time()
+        last_move_binding_key = 'i'
         
         
         while True:
             # print help message every X lines
             if (status == print_msg_every):
                 self.print_help_message()
-                self.print_speeds()
+                self.print_target_speeds()
                 status = (status + 1) % (print_msg_every+1)
 
             with self.key_lock:
@@ -314,30 +357,38 @@ class TeleopKeyboard(rclpy.node.Node):
                     status = (status + 1) % (print_msg_every+1)
                     start_move_time = time.time()
                 self.last_cmd_halt = False
-                
-                twist = self.get_accelerated_twist(start_move_time, key_copy)
+
+                v0 = self.speed
+                t0 = self.turn
+                twist = self.get_accelerated_twist(
+                    start_move_time, key_copy, 
+                    self.target_speed, self.target_turn, 
+                    self.accel, v0, t0
+                )
+                last_move_binding_key = key_copy
                 self.pub_twist.publish(twist)
             
             elif key_copy in self.speed_bindings.keys():
                 self.target_speed = self.target_speed * self.speed_bindings[key_copy][0]
                 self.target_turn = self.target_turn * self.speed_bindings[key_copy][1]
                 self.update_ros_params()
-                # send halt command
-                self.send_halt()
+
+                self.deccelerate_to_halt(last_move_binding_key)
                 # print updated speeds
-                self.print_speeds()
+                self.print_target_speeds()
                 # increment status for help message printing
                 status = (status + 1) % (print_msg_every+1)
             
             elif key_copy in self.halt_bindings.keys():
-                self.send_halt()
+                self.deccelerate_to_halt(last_move_binding_key)
+            
 
             if (key_copy == 'r'):
                 self.target_speed = 0.25
                 self.target_turn = 0.25
                 self.print_clean("Reset speeds:")
                 self.update_ros_params()
-                self.print_speeds()
+                self.print_target_speeds()
                 # increment status for help message printing
                 status = (status + 1) % (print_msg_every+1)
             
@@ -346,7 +397,7 @@ class TeleopKeyboard(rclpy.node.Node):
     
 
     def shut_down_node(self):
-        self.send_halt()
+        self.send_emergency_halt()
         self.restore_terminal_settings()
         self.get_logger().info('Sent STOP twist message, shutting down node')
         self.destroy_node()
