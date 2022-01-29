@@ -10,8 +10,8 @@ def generate_launch_description():
             output='screen',
             prefix='xterm -e',
             parameters=[
-                {'speed': 0.25},
-                {'turn': 0.25}
+                {'target_speed': 0.25},
+                {'target_turn': 0.25}
             ]
         )
     ])
