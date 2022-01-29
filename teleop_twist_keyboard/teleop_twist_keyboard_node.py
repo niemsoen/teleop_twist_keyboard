@@ -145,7 +145,7 @@ class TeleopKeyboard(rclpy.node.Node):
         self.read_key_timeout = 0.1
 
         # lock for the 'lastkey' variable
-        self.key_lock = threading.Lock()
+        self.key_lock = threading.Condition()
         self.shutdown = threading.Event()
 
         # thread for evaluating the key that was read
@@ -236,21 +236,17 @@ class TeleopKeyboard(rclpy.node.Node):
             if sys.platform == 'win32':
                 # getwch() returns a string on Windows    
                 key = msvcrt.getwch()
-                key_changed = True
             else:
                 tty.setraw(sys.stdin.fileno())            
                 key = sys.stdin.read(1) # this is blocking
-                key_changed = True                        
 
-            if key_changed:
-                self.key_lock.acquire()
-                self.last_key = key
-                self.key_lock.release()
+                with self.key_lock:
+                    self.last_key = key
+                    self.key_lock.notify()
 
-                msg = String()
-                msg.data = 'last key pressed:' + self.last_key
-                self.pub_key.publish(msg)
-                key_changed = False
+                # msg = String()
+                # msg.data = 'last key pressed:' + self.last_key
+                # self.pub_key.publish(msg)
 
             if key == "\x03":
                 self.shutdown.set()
@@ -279,6 +275,7 @@ class TeleopKeyboard(rclpy.node.Node):
                 status = (status + 1) % (print_msg_every+1)
 
             with self.key_lock:
+                self.key_lock.wait(timeout=self.read_key_timeout)
                 key_copy = self.last_key
                 self.last_key = ''
             
@@ -339,8 +336,6 @@ class TeleopKeyboard(rclpy.node.Node):
             
             if self.shutdown.is_set():
                 break
-            
-            time.sleep(self.read_key_timeout)
     
 
     def shut_down_node(self):
