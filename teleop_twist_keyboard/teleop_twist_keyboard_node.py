@@ -39,8 +39,6 @@ import rclpy
 import rclpy.node
 from rclpy.parameter import Parameter
 from rcl_interfaces.msg import SetParametersResult
-from rclpy.exceptions import ParameterNotDeclaredException
-from rcl_interfaces.msg import ParameterType
 import threading
 import time
 
@@ -52,6 +50,8 @@ if sys.platform == 'win32':
 else:
     import termios
     import tty
+
+shutdown = threading.Event()
 
 lastkey = ''
 readKeyTimeout = 0.1
@@ -123,11 +123,14 @@ def printClean(settings, msg):
     tty.setraw(sys.stdin.fileno())
 
 
-def getKey(settings, keyLock, keyPublisher):
+def getKey(settings, keyLock, node):
     global lastkey
+    keyPublisher = node.pubKey
     keyChanged = False
     key = '' # local read variable for key
-    while True:        
+    node.get_logger().info("get key thread started")
+
+    while True:  
         if sys.platform == 'win32':
             # getwch() returns a string on Windows    
             key = msvcrt.getwch()
@@ -145,11 +148,20 @@ def getKey(settings, keyLock, keyPublisher):
             msg = String()
             msg.data = 'last key pressed:' + lastkey
             keyPublisher.publish(msg)
-            keyChanged = False            
+            keyChanged = False
 
-            # check for ctrl+c
-            if (key == '\x03'):
-                break
+        if key == "\x03":
+            shutdown.set()
+            node.get_logger().info('get key set shutdown')
+            break
+
+        if shutdown.is_set():
+            node.get_logger().info('get key found shutdown')
+            break
+
+    
+    node.shut_down()
+    
 
 
 def saveTerminalSettings():
@@ -180,6 +192,8 @@ def evaluateKey(keyLock, node):
     lastCmdWasHalt = False
     keyWasPressed = True
     consecutiveMoveSteps = 0
+
+    node.get_logger().info("Started evalKey thread")
     
     while True:
         # print help message every X lines
@@ -239,12 +253,13 @@ def evaluateKey(keyLock, node):
             printClean(node.termSet, paramsToStr(node))
             
             # increment status for help message printing
-            status = (status + 1) % (printMsgEvery+1)
-        else:
-            # check for ctrl+c
-            if (key_copy == '\x03'):                
-                break
+            status = (status + 1) % (printMsgEvery+1)            
 
+        if keyWasPressed:
+            time.sleep(readKeyTimeout)
+        
+        if shutdown.is_set():
+            node.get_logger().info("evalKey thread got shutdown signal")
             # reset speeds to default
             if (key_copy == 'r'):
                 node.targetSpeed = 0.25
@@ -261,9 +276,7 @@ def evaluateKey(keyLock, node):
                 lastCmdWasHalt = True
                 printClean(node.termSet, 'STOP (Key released)')
                 status = (status + 1) % (printMsgEvery+1)                
-
-        if keyWasPressed:
-            time.sleep(readKeyTimeout)
+            break
 
 
 class MinimalParam(rclpy.node.Node):
@@ -279,6 +292,9 @@ class MinimalParam(rclpy.node.Node):
         self.accel = self.get_parameter('max_accel').get_parameter_value().double_value
         
         self.add_on_set_parameters_callback(self.parameters_callback)
+
+        self.pubTwist = self.create_publisher(geometry_msgs.msg.Twist, 'cmd_vel', 10)
+        self.pubKey = self.create_publisher(String, 'key_pressed', 10)
     
     def parameters_callback(self, params):
         for param in params:
@@ -309,6 +325,14 @@ class MinimalParam(rclpy.node.Node):
         twist.angular.z = 0.0
         
         self.pubTwist.publish(twist)
+    
+    def shut_down(self):
+        self.sendHalt()
+        
+        self.get_logger().info('Sent STOP twist message, shutting down node')
+        restoreTerminalSettings(self.termSet)
+        self.destroy_node()
+        rclpy.shutdown()
 
 
 def main():
@@ -317,11 +341,8 @@ def main():
     node = MinimalParam()
     
     node.get_logger().info('Started teleop')
-
     node.termSet = saveTerminalSettings()
-    node.pubTwist = node.create_publisher(geometry_msgs.msg.Twist, 'cmd_vel', 10)
-    node.pubKey = node.create_publisher(String, 'key_pressed', 10)
-
+    
     # lock for the 'lastkey' variable
     keyLock = threading.Lock()
 
@@ -331,23 +352,16 @@ def main():
 
     # thread for evaluating the key that was read
     evalThread = threading.Thread(target=evaluateKey, args=(keyLock,node,), name='evalThread')
-    keyThread = threading.Thread(target=getKey, args=(node.termSet, keyLock, node.pubKey), name='getKeyThread')
+    keyThread = threading.Thread(target=getKey, args=(node.termSet, keyLock, node), name='getKeyThread')
     
-    try:
-        evalThread.start() 
-        keyThread.start()
-        rclpy.spin(node)
+    evalThread.start()
+    keyThread.start()
+    rclpy.spin(node)
+    
+    evalThread.join()
+    keyThread.join()
 
-    except Exception as e:
-        node.get_logger().info('Exception occured in executing threads: ' + str(e))
-    
-    finally:
-        evalThread.join()
-        
-        node.sendHalt()
-        node.get_logger().info('Sent STOP command, shutting down')
-        
-        restoreTerminalSettings(node.termSet)        
+
 
 
 if __name__ == '__main__':
